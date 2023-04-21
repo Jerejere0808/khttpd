@@ -21,6 +21,9 @@ static struct http_server_param param;
 static struct task_struct *http_server;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+
+struct workqueue_struct *khttpd_wq;
+
 static int set_sock_opt(struct socket *sock,
                         int level,
                         int optname,
@@ -159,6 +162,10 @@ static int __init khttpd_init(void)
         pr_err("can't open listen socket\n");
         return err;
     }
+
+    // create workqueue
+    khttpd_wq = alloc_workqueue(MODULE_NAME, 0, 0);
+
     param.listen_socket = listen_socket;
     http_server = kthread_run(http_server_daemon, &param, KBUILD_MODNAME);
     if (IS_ERR(http_server)) {
