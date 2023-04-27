@@ -32,6 +32,7 @@
     "Connection: KeepAlive" CRLF CRLF "501 Not Implemented" CRLF
 
 #define RECV_BUFFER_SIZE 4096
+#define SEND_BUFFER_SIZE 256
 
 struct http_request {
     struct socket *socket;
@@ -40,6 +41,7 @@ struct http_request {
     int complete;
     struct list_head node;
     struct work_struct khttpd_work;
+    struct dir_context dir_context;
 };
 
 extern struct workqueue_struct *khttpd_wq;
@@ -79,17 +81,142 @@ static int http_server_send(struct socket *sock, const char *buf, size_t size)
     return done;
 }
 
+static void send_http_header(struct socket *sock,
+                             int status,
+                             char *status_msg,
+                             char *content_type,
+                             int content_length,
+                             char *connection)
+{
+    char buf[SEND_BUFFER_SIZE] = {0};
+
+    snprintf(buf, SEND_BUFFER_SIZE,
+             "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: "
+             "%d\r\nConnection: %s\r\n\r\n",
+             status, status_msg, content_type, content_length, connection);
+
+    http_server_send(sock, buf, strlen(buf));
+}
+
+static void send_http_content(struct socket *sock, char *content)
+{
+    char buf[SEND_BUFFER_SIZE] = {0};
+    snprintf(buf, SEND_BUFFER_SIZE, "%s\r\n", content);
+    http_server_send(sock, buf, strlen(buf));
+}
+
+static void catstr(char *res, char *WWWROOT, char *http_request_url)
+{
+    int WWWROOT_size = strlen(WWWROOT);
+    int http_request_url_size = strlen(http_request_url);
+    memset(res, 0, 256);
+    memcpy(res, WWWROOT, WWWROOT_size);
+    memcpy(res + WWWROOT_size, http_request_url, http_request_url_size);
+}
+
+static inline int read_file(struct file *fp, char *buf)
+{
+    return kernel_read(fp, buf, fp->f_inode->i_size, 0);
+}
+
+static int tracedir(struct dir_context *dir_context,
+                    const char *name,
+                    int namelen,
+                    loff_t offset,
+                    u64 ino,
+                    unsigned int d_type)
+{
+    if (strcmp(name, ".") && strcmp(name, "..")) {
+        struct http_request *request =
+            container_of(dir_context, struct http_request, dir_context);
+        char buf[SEND_BUFFER_SIZE] = {0};
+        char *url =
+            !strcmp(request->request_url, "/") ? "" : request->request_url;
+        snprintf(buf, SEND_BUFFER_SIZE,
+                 "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
+                 34 + strlen(url) + (namelen << 1), url, name, name);
+        http_server_send(request->socket, buf, strlen(buf));
+    }
+    return 0;
+}
+
+static bool directory_handler(struct http_request *request, int keep_alive)
+{
+    struct file *fp;
+    char *path_buf;
+
+    path_buf = kzalloc(SEND_BUFFER_SIZE, GFP_KERNEL);
+    if (!path_buf) {
+        pr_err("can't allocate memory!\n");
+        return false;
+    }
+
+    request->dir_context.actor = tracedir;
+
+    char *connection;
+    connection = keep_alive ? "KeepAlive" : "Close";
+
+    if (request->method != HTTP_GET) {
+        send_http_header(request->socket, 501, "Not Implemented", "text/plain",
+                         19, connection);
+        send_http_content(request->socket, "501 Not Implemented");
+        return false;
+    }
+
+    catstr(path_buf, daemon_list.path, request->request_url);
+    fp = filp_open(path_buf, O_RDONLY, 0);
+
+    if (IS_ERR(fp)) {
+        pr_info("Open file failed");
+        send_http_header(request->socket, 404, "Not Found", "text/plain", 13,
+                         "Close");
+        send_http_content(request->socket, "404 Not Found");
+        return false;
+    }
+
+    if (S_ISDIR(fp->f_inode->i_mode)) {
+        char send_buf[SEND_BUFFER_SIZE] = {0};
+        snprintf(send_buf, SEND_BUFFER_SIZE, "%s%s%s", "HTTP/1.1 200 OK\r\n",
+                 "Content-Type: text/html\r\n",
+                 "Transfer-Encoding: chunked\r\n\r\n");
+        http_server_send(request->socket, send_buf, strlen(send_buf));
+
+        snprintf(send_buf, SEND_BUFFER_SIZE, "7B\r\n%s%s%s%s",
+                 "<html><head><style>\r\n",
+                 "body{font-family: monospace; font-size: 15px;}\r\n",
+                 "td {padding: 1.5px 6px;}\r\n",
+                 "</style></head><body><table>\r\n");
+        http_server_send(request->socket, send_buf, strlen(send_buf));
+
+        iterate_dir(fp, &request->dir_context);
+
+        snprintf(send_buf, SEND_BUFFER_SIZE,
+                 "16\r\n</table></body></html>\r\n");
+        http_server_send(request->socket, send_buf, strlen(send_buf));
+
+        snprintf(send_buf, SEND_BUFFER_SIZE, "0\r\n\r\n");
+        http_server_send(request->socket, send_buf, strlen(send_buf));
+
+    } else if (S_ISREG(fp->f_inode->i_mode)) {
+        char *read_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
+        int ret = read_file(fp, read_data);
+
+        send_http_header(request->socket, 200, "OK", "text/plain", ret,
+                         connection);
+        http_server_send(request->socket, read_data, ret);
+
+        kfree(read_data);
+    }
+
+    filp_close(fp, NULL);
+    kfree(path_buf);
+    return true;
+}
+
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    char *response;
-
     pr_info("requested_url = %s\n", request->request_url);
-    if (request->method != HTTP_GET)
-        response = keep_alive ? HTTP_RESPONSE_501_KEEPALIVE : HTTP_RESPONSE_501;
-    else
-        response = keep_alive ? HTTP_RESPONSE_200_KEEPALIVE_DUMMY
-                              : HTTP_RESPONSE_200_DUMMY;
-    http_server_send(request->socket, response, strlen(response));
+    directory_handler(request, keep_alive);
     return 0;
 }
 

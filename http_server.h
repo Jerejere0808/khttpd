@@ -12,6 +12,7 @@ struct http_server_param {
 };
 
 struct httpd_service {
+    char *path;
     int is_stop;
     struct list_head head;
 };
