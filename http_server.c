@@ -34,16 +34,6 @@
 #define RECV_BUFFER_SIZE 4096
 #define SEND_BUFFER_SIZE 256
 
-struct http_request {
-    struct socket *socket;
-    enum http_method method;
-    char request_url[128];
-    int complete;
-    struct list_head node;
-    struct work_struct khttpd_work;
-    struct dir_context dir_context;
-};
-
 extern struct workqueue_struct *khttpd_wq;
 struct httpd_service daemon_list = {.is_stop = 0};
 
@@ -276,8 +266,8 @@ static int http_parser_callback_message_complete(http_parser *parser)
 
 static void http_server_worker_CMWQ(struct work_struct *work)
 {
-    struct http_request *worker =
-        container_of(work, struct http_request, khttpd_work);
+    struct httpd_work *worker =
+        container_of(work, struct httpd_work, khttpd_work);
     char *buf;
     struct http_parser parser;
     struct http_parser_settings setting = {
@@ -323,9 +313,9 @@ static void http_server_worker_CMWQ(struct work_struct *work)
 
 static struct work_struct *create_work(struct socket *sk)
 {
-    struct http_request *work;
+    struct httpd_work *work;
 
-    if (!(work = kmalloc(sizeof(struct http_request), GFP_KERNEL)))
+    if (!(work = kmalloc(sizeof(struct httpd_work), GFP_KERNEL)))
         return NULL;
 
     work->socket = sk;
@@ -338,7 +328,7 @@ static struct work_struct *create_work(struct socket *sk)
 
 static void free_work(void)
 {
-    struct http_request *l, *tar;
+    struct httpd_work *l, *tar;
     /* cppcheck-suppress uninitvar */
 
     list_for_each_entry_safe (tar, l, &daemon_list.head, node) {
@@ -352,7 +342,6 @@ static void free_work(void)
 int http_server_daemon(void *arg)
 {
     struct socket *socket;
-    // struct task_struct *worker;
     struct http_server_param *param = (struct http_server_param *) arg;
     struct work_struct *work;
 

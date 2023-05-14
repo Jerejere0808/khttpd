@@ -23,6 +23,10 @@ htstress: htstress.c
 check: all
 	@scripts/test.sh
 
+trace: all
+	sudo insmod khttpd.ko
+	sudo scripts/ftrace.sh
+
 clean:
 	make -C $(KDIR) M=$(PWD) clean
 	$(RM) htstress
