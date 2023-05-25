@@ -5,6 +5,7 @@
 #include <linux/workqueue.h>
 #include <net/sock.h>
 
+#include "hash.h"
 #include "http_parser.h"
 
 #define MODULE_NAME "khttpd"
@@ -25,6 +26,8 @@ struct http_request {
     char request_url[128];
     int complete;
     struct dir_context dir_context;
+    char *cache_buf;
+    int cache_buf_pos;
 };
 
 struct httpd_work {

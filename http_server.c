@@ -5,8 +5,8 @@
 #include <linux/tcp.h>
 #include <linux/workqueue.h>
 
-#include "http_parser.h"
 #include "http_server.h"
+#include "timer.h"
 
 #define CRLF "\r\n"
 
@@ -33,9 +33,12 @@
 
 #define RECV_BUFFER_SIZE 4096
 #define SEND_BUFFER_SIZE 256
+#define BUCKET_SIZE 10
 
 extern struct workqueue_struct *khttpd_wq;
 struct httpd_service daemon_list = {.is_stop = 0};
+struct hash_table *ht;
+struct timer_heap cache_timer_heap;
 
 static int http_server_recv(struct socket *sock, char *buf, size_t size)
 {
@@ -125,6 +128,11 @@ static int tracedir(struct dir_context *dir_context,
         snprintf(buf, SEND_BUFFER_SIZE,
                  "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
                  34 + strlen(url) + (namelen << 1), url, name, name);
+
+        memcpy(request->cache_buf + request->cache_buf_pos, buf + 4,
+               strlen(buf) - 4);
+        request->cache_buf_pos += (strlen(buf) - 4);
+
         http_server_send(request->socket, buf, strlen(buf));
     }
     return 0;
@@ -134,6 +142,8 @@ static bool directory_handler(struct http_request *request, int keep_alive)
 {
     struct file *fp;
     char *path_buf;
+    char *connection;
+    char *cache_data;
 
     path_buf = kzalloc(SEND_BUFFER_SIZE, GFP_KERNEL);
     if (!path_buf) {
@@ -143,7 +153,6 @@ static bool directory_handler(struct http_request *request, int keep_alive)
 
     request->dir_context.actor = tracedir;
 
-    char *connection;
     connection = keep_alive ? "KeepAlive" : "Close";
 
     if (request->method != HTTP_GET) {
@@ -154,14 +163,32 @@ static bool directory_handler(struct http_request *request, int keep_alive)
     }
 
     catstr(path_buf, daemon_list.path, request->request_url);
-    fp = filp_open(path_buf, O_RDONLY, 0);
 
+    fp = filp_open(path_buf, O_RDONLY, 0);
     if (IS_ERR(fp)) {
         pr_info("Open file failed");
         send_http_header(request->socket, 404, "Not Found", "text/plain", 13,
                          "Close");
         send_http_content(request->socket, "404 Not Found");
         return false;
+    }
+
+    cache_data = (char *) hash_table_find(ht, path_buf);
+    if (cache_data) {
+        if (S_ISDIR(fp->f_inode->i_mode)) {
+            send_http_header(request->socket, 200, "OK", "text/html",
+                             strlen(cache_data), connection);
+            http_server_send(request->socket, cache_data, strlen(cache_data));
+
+        } else if (S_ISREG(fp->f_inode->i_mode)) {
+            send_http_header(request->socket, 200, "OK", "text/plain",
+                             strlen(cache_data), connection);
+            http_server_send(request->socket, cache_data, strlen(cache_data));
+        }
+
+        filp_close(fp, NULL);
+        kfree(path_buf);
+        return true;
     }
 
     if (S_ISDIR(fp->f_inode->i_mode)) {
@@ -178,7 +205,18 @@ static bool directory_handler(struct http_request *request, int keep_alive)
                  "</style></head><body><table>\r\n");
         http_server_send(request->socket, send_buf, strlen(send_buf));
 
+        request->cache_buf = (char *) kzalloc(20000, GFP_KERNEL);
+        request->cache_buf_pos = 0;
+
+        memcpy(request->cache_buf + request->cache_buf_pos, "<table><tbody>",
+               14);
+        request->cache_buf_pos += 14;
+
         iterate_dir(fp, &request->dir_context);
+
+        memcpy(request->cache_buf + request->cache_buf_pos, "</tbody></table>",
+               16);
+        request->cache_buf_pos += 16;
 
         snprintf(send_buf, SEND_BUFFER_SIZE,
                  "16\r\n</table></body></html>\r\n");
@@ -193,11 +231,22 @@ static bool directory_handler(struct http_request *request, int keep_alive)
 
         send_http_header(request->socket, 200, "OK", "text/plain", ret,
                          connection);
+
+        request->cache_buf =
+            (char *) kzalloc(fp->f_inode->i_size + 1, GFP_KERNEL);
+        strncat(request->cache_buf, read_data, fp->f_inode->i_size);
+
         http_server_send(request->socket, read_data, ret);
 
         kfree(read_data);
     }
 
+    struct hash_element *elem =
+        hash_table_add(ht, path_buf, request->cache_buf);
+    if (elem)
+        cache_add_timer(elem, 10000, &cache_timer_heap);
+
+    kfree(request->cache_buf);
     filp_close(fp, NULL);
     kfree(path_buf);
     return true;
@@ -205,7 +254,7 @@ static bool directory_handler(struct http_request *request, int keep_alive)
 
 static int http_server_response(struct http_request *request, int keep_alive)
 {
-    pr_info("requested_url = %s\n", request->request_url);
+    // pr_info("requested_url = %s\n", request->request_url);
     directory_handler(request, keep_alive);
     return 0;
 }
@@ -266,6 +315,7 @@ static int http_parser_callback_message_complete(http_parser *parser)
 
 static void http_server_worker_CMWQ(struct work_struct *work)
 {
+    // pr_err("http_server_worker_CMWQ\n");
     struct httpd_work *worker =
         container_of(work, struct httpd_work, khttpd_work);
     char *buf;
@@ -296,6 +346,7 @@ static void http_server_worker_CMWQ(struct work_struct *work)
     while (!daemon_list.is_stop) {
         int ret = http_server_recv(socket, buf, RECV_BUFFER_SIZE - 1);
         // pr_info("buf = %s\n", buf);
+        // pr_info("request_url = %s\n", request.request_url);
         if (ret <= 0) {
             if (ret)
                 pr_err("recv error: %d\n", ret);
@@ -350,12 +401,19 @@ int http_server_daemon(void *arg)
 
     INIT_LIST_HEAD(&daemon_list.head);
 
+    ht = hash_table_create(BUCKET_SIZE);
+    spin_lock_init(&ht->lock);
+
+    server_init_timer_heap(&cache_timer_heap);
+
     while (!kthread_should_stop()) {
-        int err = kernel_accept(param->listen_socket, &socket, 0);
+        int err = kernel_accept(param->listen_socket, &socket, SOCK_NONBLOCK);
+        cache_handle_expired_timers(&cache_timer_heap, ht);
+
         if (err < 0) {
             if (signal_pending(current))
                 break;
-            pr_err("kernel_accept() error: %d\n", err);
+            // pr_err("kernel_accept() error: %d\n", err);
             continue;
         }
 
@@ -374,6 +432,7 @@ int http_server_daemon(void *arg)
     printk(MODULE_NAME ": daemon shutdown in progress...\n");
 
     daemon_list.is_stop = 1;
+    server_free_timer(&cache_timer_heap);
     free_work();
 
     return 0;

@@ -14,5 +14,5 @@ sudo echo http_server_worker_CMWQ > $TRACE_DIR/set_graph_function
 
 # execute
 sudo echo 1 > $TRACE_DIR/tracing_on
-./htstress localhost:8081/home/jeremy/ -n 1
+./htstress localhost:8081 -n 1
 sudo echo 0 > $TRACE_DIR/tracing_on
