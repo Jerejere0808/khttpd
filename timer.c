@@ -116,7 +116,7 @@ static inline bool timer_heap_cmpxchg(struct timer_node **var,
     bool ret;
     union u64 {
         struct {
-            int low, high;
+            [[maybe_unused]] int low, high;
         } s;
         long long ui;
     } cmp = {.ui = *old}, with = {.ui = neu};
@@ -139,14 +139,13 @@ static inline bool timer_heap_cmpxchg(struct timer_node **var,
 void timer_heap_insert(struct timer_heap *server_timer_heap,
                        struct timer_node *item)
 {
-    struct timer_node **slot;
-    size_t old_size;
     long long old;
     bool restart = false;
     do {
-        old_size = atomic_read(&server_timer_heap->size);
+        size_t old_size = atomic_read(&server_timer_heap->size);
 
-        slot = (struct timer_node **) &server_timer_heap->heap[old_size + 1];
+        struct timer_node **slot =
+            (struct timer_node **) &server_timer_heap->heap[old_size + 1];
         old = (long long) *slot;
 
         restart = false;

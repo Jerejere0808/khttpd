@@ -2,7 +2,7 @@
 
 void *hash_table_find(struct hash_table *ht, char *key)
 {
-    struct hash_element *loop;
+    struct hash_element *loop = NULL;
     struct list_head *bucket = &ht->buckets[strlen(key) % ht->bucket_size];
     void *data = NULL;
 
@@ -28,27 +28,6 @@ static void free_hash_element_rcu(struct rcu_head *rcu)
     return;
 }
 
-void *hash_table_remove(struct hash_table *ht, char *key)
-{
-    struct hash_element *loop;
-    struct list_head *bucket = &ht->buckets[strlen(key) % ht->bucket_size];
-    void *data = NULL;
-
-    spin_lock(&ht->lock);
-    list_for_each_entry_rcu(loop, bucket, node)
-    {
-        if (strcmp(loop->key, key) == 0) {
-            data = loop->data;
-            list_del_rcu(&loop->node);
-            call_rcu(&loop->rcu, free_hash_element_rcu);
-            break;
-        }
-    }
-    spin_unlock(&ht->lock);
-
-    return data;
-}
-
 void *hash_table_remove_by_elem_pointer(struct hash_table *ht,
                                         struct hash_element *elem)
 {
@@ -65,7 +44,7 @@ struct hash_element *hash_table_add(struct hash_table *ht,
                                     char *key,
                                     void *data)
 {
-    struct hash_element *loop, *elem;
+    struct hash_element *loop = NULL, *elem = NULL;
     struct list_head *bucket = &ht->buckets[strlen(key) % ht->bucket_size];
 
     elem = (struct hash_element *) kmalloc(sizeof(struct hash_element),

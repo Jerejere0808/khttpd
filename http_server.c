@@ -3,6 +3,8 @@
 #include <linux/kthread.h>
 #include <linux/sched/signal.h>
 #include <linux/tcp.h>
+#include <linux/time.h>
+#include <linux/timekeeping.h>
 #include <linux/workqueue.h>
 
 #include "http_server.h"
@@ -123,17 +125,52 @@ static int tracedir(struct dir_context *dir_context,
         struct http_request *request =
             container_of(dir_context, struct http_request, dir_context);
         char buf[SEND_BUFFER_SIZE] = {0};
+
+        char absolute_path[256];
+        int path_pos = 0;
+        memset(absolute_path, 0, 256);
+
+        memcpy(absolute_path, daemon_list.path, strlen(daemon_list.path));
+        path_pos += strlen(daemon_list.path);
+        memcpy(absolute_path + path_pos, request->request_url,
+               strlen(request->request_url));
+        path_pos += strlen(request->request_url);
+
+        if (strcmp(absolute_path, "/")) {
+            memcpy(absolute_path + path_pos, "/", 1);
+            path_pos += 1;
+        }
+
+        memcpy(absolute_path + path_pos, name, strlen(name));
+
+        struct file *fp = filp_open(absolute_path, O_RDONLY, 0);
+        if (IS_ERR(fp)) {
+            pr_info("Open file failed");
+            return 0;
+        }
+
+        struct tm result;
+        time64_to_tm(fp->f_inode->i_mtime.tv_sec, 0, &result);
+
+        char size_str[100];
+        memset(size_str, 0, 100);
+        snprintf(size_str, 100, "%lld", fp->f_inode->i_size);
+
         char *url =
             !strcmp(request->request_url, "/") ? "" : request->request_url;
         snprintf(buf, SEND_BUFFER_SIZE,
-                 "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a></td></tr>\r\n",
-                 34 + strlen(url) + (namelen << 1), url, name, name);
-
+                 "%lx\r\n<tr><td><a href=\"%s/%s\">%s</a>    %04ld/%02d/%02d "
+                 "%s Bytes</td></tr>\r\n",
+                 34 + strlen(url) + (namelen << 1) + 14 + strlen(size_str) + 7,
+                 url, name, name, result.tm_year + 1900, result.tm_mon + 1,
+                 result.tm_mday, size_str);
         memcpy(request->cache_buf + request->cache_buf_pos, buf + 4,
                strlen(buf) - 4);
         request->cache_buf_pos += (strlen(buf) - 4);
 
         http_server_send(request->socket, buf, strlen(buf));
+
+        filp_close(fp, NULL);
     }
     return 0;
 }
