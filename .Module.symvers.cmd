@@ -1,1 +1,0 @@
-cmd_/home/jeremy/linux2023/khttpd/Module.symvers := sed 's/ko$$/o/' /home/jeremy/linux2023/khttpd/modules.order | scripts/mod/modpost -m -a  -o /home/jeremy/linux2023/khttpd/Module.symvers -e -i Module.symvers   -T -

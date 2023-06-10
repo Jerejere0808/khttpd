@@ -28,6 +28,7 @@ struct http_request {
     struct dir_context dir_context;
     char *cache_buf;
     int cache_buf_pos;
+    unsigned int cache_size;
 };
 
 struct httpd_work {

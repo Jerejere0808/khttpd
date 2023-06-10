@@ -7,6 +7,7 @@
 #include <linux/timekeeping.h>
 #include <linux/workqueue.h>
 
+#include "compress.h"
 #include "http_server.h"
 #include "timer.h"
 
@@ -87,7 +88,7 @@ static void send_http_header(struct socket *sock,
 
     snprintf(buf, SEND_BUFFER_SIZE,
              "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: "
-             "%d\r\nConnection: %s\r\n\r\n",
+             "%d\r\nContent-Encoding: deflate\r\nConnection: %s\r\n\r\n",
              status, status_msg, content_type, content_length, connection);
 
     http_server_send(sock, buf, strlen(buf));
@@ -181,6 +182,7 @@ static bool directory_handler(struct http_request *request, int keep_alive)
     char *path_buf;
     char *connection;
     char *cache_data;
+    unsigned int cache_size;
 
     path_buf = kzalloc(SEND_BUFFER_SIZE, GFP_KERNEL);
     if (!path_buf) {
@@ -210,20 +212,21 @@ static bool directory_handler(struct http_request *request, int keep_alive)
         return false;
     }
 
-    cache_data = (char *) hash_table_find(ht, path_buf);
+    cache_data = hash_table_find(ht, path_buf, &cache_size);
     if (cache_data) {
         if (S_ISDIR(fp->f_inode->i_mode)) {
             send_http_header(request->socket, 200, "OK", "text/html",
-                             strlen(cache_data), connection);
-            http_server_send(request->socket, cache_data, strlen(cache_data));
+                             cache_size, connection);
+            http_server_send(request->socket, cache_data, cache_size);
 
         } else if (S_ISREG(fp->f_inode->i_mode)) {
             send_http_header(request->socket, 200, "OK", "text/plain",
-                             strlen(cache_data), connection);
-            http_server_send(request->socket, cache_data, strlen(cache_data));
+                             cache_size, connection);
+            http_server_send(request->socket, cache_data, cache_size);
         }
 
         filp_close(fp, NULL);
+        kfree(cache_data);
         kfree(path_buf);
         return true;
     }
@@ -255,6 +258,14 @@ static bool directory_handler(struct http_request *request, int keep_alive)
                16);
         request->cache_buf_pos += 16;
 
+        unsigned int tmp_size = 20000;
+        char *tmp = kmalloc(tmp_size + 1, GFP_KERNEL);
+        memcpy(tmp, request->cache_buf, tmp_size);
+        request->cache_size = tmp_size;
+        deflate_compress(tmp, tmp_size, request->cache_buf,
+                         &request->cache_size);
+        kfree(tmp);
+
         snprintf(send_buf, SEND_BUFFER_SIZE,
                  "16\r\n</table></body></html>\r\n");
         http_server_send(request->socket, send_buf, strlen(send_buf));
@@ -264,26 +275,29 @@ static bool directory_handler(struct http_request *request, int keep_alive)
 
     } else if (S_ISREG(fp->f_inode->i_mode)) {
         char *read_data = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
-        int ret = read_file(fp, read_data);
+        int len = read_file(fp, read_data);
 
-        send_http_header(request->socket, 200, "OK", "text/plain", ret,
-                         connection);
+        request->cache_buf = kmalloc(fp->f_inode->i_size, GFP_KERNEL);
+        request->cache_size = len;
 
-        request->cache_buf =
-            (char *) kzalloc(fp->f_inode->i_size + 1, GFP_KERNEL);
-        strncat(request->cache_buf, read_data, fp->f_inode->i_size);
+        deflate_compress(read_data, len, request->cache_buf,
+                         &request->cache_size);
 
-        http_server_send(request->socket, read_data, ret);
+        send_http_header(request->socket, 200, "OK", "text/plain",
+                         request->cache_size, connection);
+        http_server_send(request->socket, request->cache_buf,
+                         request->cache_size);
 
         kfree(read_data);
     }
 
     struct hash_element *elem =
-        hash_table_add(ht, path_buf, request->cache_buf);
+        hash_table_add(ht, path_buf, request->cache_buf, request->cache_size);
     if (elem)
         cache_add_timer(elem, 10000, &cache_timer_heap);
 
     kfree(request->cache_buf);
+    kfree(cache_data);
     filp_close(fp, NULL);
     kfree(path_buf);
     return true;

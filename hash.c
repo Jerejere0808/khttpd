@@ -1,22 +1,26 @@
 #include "hash.h"
 
-void *hash_table_find(struct hash_table *ht, char *key)
+char *hash_table_find(struct hash_table *ht,
+                      char *key,
+                      unsigned int *cache_size)
 {
     struct hash_element *loop = NULL;
     struct list_head *bucket = &ht->buckets[strlen(key) % ht->bucket_size];
-    void *data = NULL;
+    char *cache_data = NULL;
 
     rcu_read_lock();
     list_for_each_entry_rcu(loop, bucket, node)
     {
         if (strcmp(loop->key, key) == 0) {
-            data = loop->data;
+            *cache_size = loop->size;
+            cache_data = kmalloc(loop->size + 1, GFP_KERNEL);
+            memcpy(cache_data, loop->data, loop->size);
             break;
         }
     }
     rcu_read_unlock();
 
-    return data;
+    return cache_data;
 }
 
 static void free_hash_element_rcu(struct rcu_head *rcu)
@@ -42,7 +46,8 @@ void *hash_table_remove_by_elem_pointer(struct hash_table *ht,
 
 struct hash_element *hash_table_add(struct hash_table *ht,
                                     char *key,
-                                    void *data)
+                                    void *data,
+                                    unsigned int size)
 {
     struct hash_element *loop = NULL, *elem = NULL;
     struct list_head *bucket = &ht->buckets[strlen(key) % ht->bucket_size];
@@ -55,8 +60,10 @@ struct hash_element *hash_table_add(struct hash_table *ht,
     elem->key = (char *) kmalloc(strlen(key) + 1, GFP_KERNEL);
     memcpy(elem->key, key, strlen(key));
 
-    elem->data = (void *) kmalloc(strlen(data) + 1, GFP_KERNEL);
-    memcpy(elem->data, data, strlen(data));
+    elem->data = (void *) kmalloc(size + 1, GFP_KERNEL);
+    memcpy(elem->data, data, size);
+
+    elem->size = size;
 
     rcu_read_lock();
     list_for_each_entry_rcu(loop, bucket, node)

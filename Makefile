@@ -9,7 +9,8 @@ khttpd-objs := \
 	http_server.o \
 	main.o \
 	hash.o \
-	timer.o 
+	timer.o \
+	compress.o
 
 GIT_HOOKS := .git/hooks/applied
 all: $(GIT_HOOKS) http_parser.c htstress
